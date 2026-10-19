@@ -1,0 +1,309 @@
+<uiView
+  onLoad="
+    // Trend arrow glyphs. Indices 1-7 match the BLE trend enum from the
+    // bridge. Index 0 (unknown/NOT_COMPUTABLE) uses F111.
+    var ARROW_CHARS = [
+      '&#xF111;',  // 0 unknown
+      '&#xF266;',  // 1 DoubleUp
+      '&#xF266;',  // 2 SingleUp
+      '&#xF112;',  // 3 FortyFiveUp
+      '&#xF394;',  // 4 Flat
+      '&#xF113;',  // 5 FortyFiveDown
+      '&#xF267;',  // 6 SingleDown
+      '&#xF267;'   // 7 DoubleDown
+    ];
+
+    var GLUCOSE_HEX = [
+      '#888888',  // 0 gray   - no data / stale
+      '#26f45e',  // 1 green  - in range
+      '#ffa500',  // 2 orange - high
+      '#ff0000'   // 3 red    - low
+    ];
+
+    // Status codes from main.js; 3-5 replace the age with a message.
+    var STATUS_TEXT = ['', '', '', 'Set key', 'Wrong key', 'Clock error'];
+
+    // An output only fires when its value changes, but the age line is
+    // driven by two outputs and only changes per minute, and the colour is
+    // shared by three elements -- so those two keep a last-drawn value.
+    var lastAgeKey, lastCol;
+    var ageSec = 9999, status = 2;
+
+    // On the watch, a subscription past the sport mode's limit (~15 shared)
+    // throws and would abort the rest of onActivate; values can also arrive
+    // as undefined, which the simulator never does.
+    var sub = function(path, fn) {
+      try { $.subscribe(path, fn); } catch (e) { systemEvent('NSG sub failed ' + path); }
+    };
+
+    // Age line: minutes since the reading (red once stale), or a key/clock
+    // message.
+    var updateAgeDisplay = function() {
+      var txt, col;
+      if (status >= 3 && status <= 5) { txt = STATUS_TEXT[status]; col = '#ffa500'; }
+      else if (ageSec >= 9999)        { txt = '--'; col = '#888888'; }
+      else { txt = Math.floor(ageSec / 60) + ' min'; col = (status == 1) ? '#ff0000' : '#FFFFFF'; }
+      if (txt + col === lastAgeKey) return;
+      lastAgeKey = txt + col;
+      setText('#age-val', txt);
+      setStyle('#age-val', 'color', col);
+      if (ageSec >= 9999) {
+        // An undefined glucose output may not reach its subscriber, so blank
+        // the glucose value from here too.
+        setText('#glucose-val', '--.-');
+      }
+    };
+
+    // 30-minute graph. main.js streams one slot per second through gPoint
+    // (index * 256 + value): 0-29 the minute slots (mmol/L x 10, 0 = none),
+    // 30 the newest slot's index. The guide lines mark the standard 3.9-10.0
+    // mmol/L (70-180 mg/dL) range, independent of the alert thresholds.
+    var G = new Uint8Array(30), gHead = -1;
+
+    var onGraph = function(v) {
+      var i, val, j;
+      if (!isFinite(v)) return;
+      i = Math.floor(v / 256); val = v - i * 256;
+      if (i < 30) { G[i] = val; }
+      else if (i == 30) {
+        // A new minute: slots it overtook still hold 30-minute-old values.
+        if (gHead >= 0 && val != gHead) {
+          // More than one minute at a time would be unexpected: log it.
+          if ((val - gHead + 30) % 30 > 2) { systemEvent('NSG graph head jump ' + gHead + '->' + val); }
+          for (j = (gHead + 1) % 30; ; j = (j + 1) % 30) { G[j] = 0; if (j == val) break; }
+        }
+        gHead = val;
+        try { control('#graph', 'REFRESH'); } catch (e) { systemEvent('NSG graph refresh failed: ' + e); }
+      }
+    };
+
+    // Fixed vertical scale, 2.0-15.0 mmol/L (values outside are drawn at the
+    // edge), so the 3.9 and 10.0 lines always sit at the same height and their
+    // labels can be ordinary text elements: canvas text ignores the watch's
+    // font sizes and lacks letters.
+    var Y_MIN = 20, Y_MAX = 150;
+
+    // White line oldest -> newest, joined across gaps of up to 6 minutes
+    // (5-minute sensors), over the 3.9 / 10.0 guide lines and a gridline
+    // every 5 minutes.
+    var drawGraphUnsafe = function(c) {
+      var w = c.width, h = c.height, k, j, v, x, y, prev = -99;
+      if (gHead < 0) return;
+      var Y = function(val) {
+        val = Math.max(Y_MIN, Math.min(Y_MAX, val));
+        return h - 2 - (val - Y_MIN) * (h - 4) / (Y_MAX - Y_MIN);
+      };
+      // minutesAgo 30 .. 0 across the width
+      var X = function(minutesAgo) { return 2 + (30 - minutesAgo) * (w - 4) / 30; };
+      c.lineCap = 'round';
+
+      c.lineWidth = 1;
+      c.strokeStyle = '#CCCCCC';
+      c.beginPath();
+      for (k = 0; k <= 30; k += 5) { c.moveTo(X(k), 0); c.lineTo(X(k), h); }
+      c.stroke();
+
+      c.lineWidth = 2;
+      c.strokeStyle = '#CC2222'; c.beginPath(); c.moveTo(0, Y(39));  c.lineTo(w, Y(39));  c.stroke();
+      c.strokeStyle = '#CC7700'; c.beginPath(); c.moveTo(0, Y(100)); c.lineTo(w, Y(100)); c.stroke();
+
+      c.lineWidth = 5;
+      c.strokeStyle = '#FFFFFF';
+      c.beginPath();
+      for (k = 0; k < 30; k++) {
+        j = (gHead + 1 + k) % 30; v = G[j];
+        if (!v) continue;
+        x = X(29 - k); y = Y(v);
+        if (k - prev <= 6) { c.lineTo(x, y); } else { c.moveTo(x, y); c.lineTo(x + 0.1, y); } // lone point: a round dot
+        prev = k;
+      }
+      c.stroke();
+    };
+
+    // A throw inside a canvas build can leave the canvas blank for good, so
+    // log it (watch log: 'NSG graph ...') instead of letting it escape.
+    var drawGraph = function(c) {
+      try { drawGraphUnsafe(c); }
+      catch (e) { systemEvent('NSG graph draw failed: ' + e); }
+    };
+
+    // Pump line under the clock: 'IOB 1.35 U  loop 3m'. Hidden while there is
+    // no pump data (MDI). Loop age turns orange at 10 min, red at 20.
+    var pumpShown = false;
+    var showPump = function(on) {
+      if (on === pumpShown) return;
+      pumpShown = on;
+      // The watch needs the element and its contents set (WATCH_QUIRKS.md).
+      setStyle('#pump-val', 'visibility', on ? 'visible' : 'hidden');
+      setStyle('#pump-val *', 'visibility', on ? 'visible' : 'hidden');
+    };
+    var onPump = function(v) {
+      var iob, loop, a, frac, txt;
+      if (!isFinite(v)) return;
+      iob = Math.floor(v / 256) - 32768;
+      loop = v % 256;
+      if (iob == -32768 && loop == 255) { showPump(false); return; }
+      if (iob == -32768) { txt = 'IOB --'; }
+      else {
+        a = iob < 0 ? -iob : iob;
+        frac = a % 100;
+        txt = 'IOB ' + (iob < 0 ? '-' : '') + Math.floor(a / 100) + '.' + (frac < 10 ? '0' : '') + frac + ' U';
+      }
+      if (loop != 255) { txt += '  loop ' + loop + 'm'; }
+      setText('#pump-val', txt);
+      setStyle('#pump-val', 'color', (loop == 255 || loop < 10) ? '#FFFFFF' : loop < 20 ? '#ffa500' : '#ff0000');
+      showPump(true);
+    };
+
+    var formatRate = function(r10) {
+      if (!isFinite(r10) || r10 === 0) return '+0.0';
+      var sign = r10 > 0 ? '+' : '-';
+      var abs = r10 > 0 ? r10 : -r10;
+      var whole = Math.floor(abs / 10);
+      var frac = abs - whole * 10;
+      return sign + whole + '.' + frac;
+    };
+  "
+  onActivate="
+    lastAgeKey = lastCol = null;
+    var wasShown = pumpShown;           // re-apply visibility after re-activation
+    pumpShown = !wasShown; showPump(wasShown);
+    systemEvent('NSG view activated');
+    try { control('#graph', 'REFRESH'); } catch (e) {}
+
+    sub('/Dev/Time/LocalTime/Min', function(v) {
+      if (isFinite(v)) setText('#clock-val', formatValue(v, 'time HH:mm'));
+    });
+
+    sub('/Zapp/{zapp_index}/Output/glucoseNow', function(v) {
+      if (!isFinite(v) || !(v > 0)) {
+        setText('#glucose-val', '--.-');
+      } else {
+        var rounded = Math.round(v * 10) / 10;
+        var whole = Math.floor(rounded);
+        var frac = Math.round((rounded - whole) * 10);
+        setText('#glucose-val', whole + '.' + frac);
+      }
+    });
+
+    // glState = trend + 8 * colour + 32 * status (see main.js).
+    sub('/Zapp/{zapp_index}/Output/glState', function(v) {
+      if (!isFinite(v)) return;
+      var trend = v % 8, colour = Math.floor(v / 8) % 4;
+      var col = GLUCOSE_HEX[colour];
+      setText('#trend-val', ARROW_CHARS[trend]);
+      if (col !== lastCol) {
+        lastCol = col;
+        setStyle('#glucose-val', 'color', col);
+        setStyle('#trend-val',   'color', col);
+        setStyle('#rate-val',    'color', col);
+      }
+      status = Math.floor(v / 32);
+      updateAgeDisplay();
+    });
+
+    sub('/Zapp/{zapp_index}/Output/minutesAgo', function(v) {
+      ageSec = (isFinite(v) && v >= 0 && v < 9999) ? v : 9999;
+      updateAgeDisplay();
+    });
+
+    sub('/Zapp/{zapp_index}/Output/deltaRate', function(v) {
+      setText('#rate-val', formatRate(v));
+    });
+
+    sub('/Zapp/{zapp_index}/Output/gPoint', onGraph);
+
+    sub('/Zapp/{zapp_index}/Output/pumpState', onPump);
+
+    sub('/Activity/Move/-1/HeartRate/Current', function(v) {
+      var bpm = (isFinite(v) && v > 0) ? Math.round(v * 60) : 0;
+      setText('#hr-val', (bpm > 0) ? (bpm + '') : '--');
+    });
+  "
+  onDeactivate="systemEvent('NSG view deactivated');"
+>
+  <div>
+
+    <div id="clock-val"
+         class="sp-title-text sp-t-m f-num p-hc"
+         style="top:calc(10% - 50%e); left:calc(50% - 50%e);">--:--</div>
+
+    <!-- IOB and loop age from the AID app; hidden without pump data -->
+    <div id="pump-val"
+         class="sp-t-s p-hc"
+         style="top:calc(16.5% - 50%e); left:calc(50% - 50%e); visibility:hidden;">IOB --</div>
+
+    <div class="p-m" style="height:75%; width:86%;">
+
+      <div id="glucose-val"
+           class="f-d-l f-num"
+           style="
+             top:calc(40% - 50%e);
+             left:calc(40% - 100%e);
+             width:44%;
+             text-align:right;
+           ">--.-</div>
+
+      <div id="trend-val"
+           class="f-ico cm-mid"
+           style="
+             top:calc(25% - 90%e);
+             left:calc(50% - 100%e);
+             width:30%;
+             text-align:center;
+             font-weight:bold;
+           ">&#xF111;</div>
+
+      <!-- Delta rate -->
+      <div id="rate-val"
+           class="f-d-xs cm-mid"
+           style="
+             top:calc(25% - 90%e);
+             left:calc(25% - 62%e);
+             width:30%;
+             text-align:center;
+             font-weight:bold;
+           ">+0.0</div>
+
+      <!-- 30-minute graph: canvas for the lines, text elements for labels.
+           Scale 2-15 mmol/L over the canvas height (54%-78%):
+           10.0 sits 38.5% down it (~63%), 3.9 85.4% down (~74.5%). -->
+      <div style="position:absolute; top:54%; left:12%; width:76%; height:24%;">
+        <object id="graph" type="canvas" build="ctx => drawGraph(ctx)" style="width:100%; height:100%;" />
+      </div>
+      <div class="sp-t-s" style="top:calc(63% - 100%e); left:calc(88% - 100%e); color:#CC7700;">10 / 180</div>
+      <div class="sp-t-s" style="top:calc(74.5%); left:calc(88% - 100%e); color:#CC2222;">3.9 / 70</div>
+      <div class="sp-t-s" style="top:calc(81.5% - 50%e); left:calc(12%); color:#CCCCCC;">-30</div>
+      <div class="sp-t-s" style="top:calc(81.5% - 50%e); left:calc(50% - 50%e); color:#CCCCCC;">-15</div>
+      <div class="sp-t-s" style="top:calc(81.5% - 50%e); left:calc(88% - 100%e); color:#CCCCCC;">now</div>
+
+      <div id="age-val"
+           class="sp-b-m cm-mid p-hc"
+           style="
+             top:calc(91.5% - 50%e);
+             left:calc(50% - 50%e);
+             width:60%;
+             text-align:center;
+           ">--</div>
+
+      <div id="hr-val"
+           class="f-d-l f-num"
+           style="
+             top:calc(40% - 50%e);
+             left:calc(80% - 50%e);
+             width:35%;
+             text-align:left;
+           ">--</div>
+
+      <div class="f-ico cm-mid"
+           style="
+             top:calc(20% - 50%e);
+             left:calc(75% - 100%e);
+             width:12%;
+             text-align:left;
+           ">&#xF101;</div>
+
+    </div>
+
+  </div>
+</uiView>

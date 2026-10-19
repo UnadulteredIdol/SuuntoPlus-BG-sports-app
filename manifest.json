@@ -1,0 +1,94 @@
+{
+  "name": "NS Glucose",
+  "version": "1.4",
+  "author": "Norwin Zuidema",
+  "description": "CGM glucose during workouts via a Nightscout BLE bridge",
+  "type": "device",
+  "usage": "workout",
+  "modificationTime": 1792317325,
+  "in": [
+    {
+      "name": "now",
+      "source": "Dev/Time",
+      "type": "subscribe"
+    }
+  ],
+  "out": [
+    {
+      "name": "con"
+    },
+    {
+      "name": "glucoseNow"
+    },
+    {
+      "name": "bloodGlucoseExercise",
+      "format": "TwoDecimal_Fourdigits",
+      "log": true,
+      "shownName": "Blood Glucose (mM)"
+    },
+    {
+      "name": "minutesAgo"
+    },
+    {
+      "name": "deltaRate"
+    },
+    {
+      "name": "glState"
+    },
+    {
+      "name": "gPoint"
+    },
+    {
+      "name": "pumpState"
+    }
+  ],
+  "settings": [
+    {
+      "shownName": "Bridge key",
+      "path": "settings.bridgeKey",
+      "type": "string",
+      "maxLength": 40,
+      "mandatory": "32 characters shown in the NS Bridge iPhone app"
+    },
+    {
+      "shownName": "Low [mmol/L]",
+      "path": "settings.lowMmol",
+      "type": "float",
+      "min": 3,
+      "max": 8
+    },
+    {
+      "shownName": "High [mmol/L]",
+      "path": "settings.highMmol",
+      "type": "float",
+      "min": 7,
+      "max": 20
+    },
+    {
+      "shownName": "Stale after [min]",
+      "path": "settings.staleMin",
+      "type": "int",
+      "min": 3,
+      "max": 20,
+      "inputType": "slider"
+    },
+    {
+      "shownName": "Low/high alerts",
+      "path": "settings.alerts",
+      "type": "boolean"
+    },
+    {
+      "shownName": "Record glucose in workout",
+      "path": "settings.record",
+      "type": "boolean"
+    }
+  ],
+  "template": [
+    {
+      "name": "q.html",
+      "displays": [
+        "q"
+      ]
+    }
+  ]
+}

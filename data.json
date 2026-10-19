@@ -1,0 +1,10 @@
+{
+  "settings": {
+    "bridgeKey": "",
+    "lowMmol": 5.0,
+    "highMmol": 10.0,
+    "staleMin": 6,
+    "alerts": true,
+    "record": true
+  }
+}
